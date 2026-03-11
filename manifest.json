@@ -1,0 +1,48 @@
+{
+  "type": "service",
+  "name": "Telegram Notes",
+  "id": "telegram-notes",
+  "description": "Telegram bot that saves messages as notes in your notebook. Send text, links, or images — they'll appear on a dedicated page.",
+  "version": "0.1.0",
+  "author": "Moonstone",
+  "icon": "📨",
+  "entry": "service.py",
+  "auto_start": false,
+  "preferences": [
+    {
+      "key": "bot_token",
+      "label": "Telegram Bot Token",
+      "type": "string",
+      "description": "Get one from @BotFather",
+      "required": true
+    },
+    {
+      "key": "allowed_users",
+      "label": "Allowed User IDs",
+      "type": "string",
+      "description": "Comma-separated Telegram user IDs (leave empty to allow all)",
+      "default": ""
+    },
+    {
+      "key": "target_page",
+      "label": "Target Page",
+      "type": "string",
+      "description": "Page where notes are saved",
+      "default": "Inbox:Telegram"
+    },
+    {
+      "key": "date_subpages",
+      "label": "Daily Sub-pages",
+      "type": "boolean",
+      "description": "Create daily sub-pages (e.g. Inbox:Telegram:2026-02-24)",
+      "default": true
+    },
+    {
+      "key": "todo_page",
+      "label": "ToDo Page",
+      "type": "string",
+      "description": "Page where /todo commands are saved",
+      "default": "Inbox:Tasks"
+    }
+  ]
+}
