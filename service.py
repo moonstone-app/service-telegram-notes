@@ -20,21 +20,17 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# Add parent dir to path so we can import the SDK
-sdk_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
-                       'moonstone', 'webbridge')
-if os.path.isdir(sdk_dir):
-    sys.path.insert(0, sdk_dir)
-
-# Also try the service's own directory (SDK may be copied there)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Find moonstone_sdk via MOONSTONE_SDK_PATH env var (set by ServiceManager)
+sdk_env = os.environ.get('MOONSTONE_SDK_PATH')
+if sdk_env and os.path.isfile(os.path.join(sdk_env, 'moonstone_sdk.py')):
+    sys.path.insert(0, sdk_env)
 
 try:
     from moonstone_sdk import MoonstoneAPI, MoonstoneAPIError, load_config, save_state, load_state, setup_logging
 except ImportError:
     # Fallback: minimal inline SDK
     print('WARNING: moonstone_sdk not found, using inline fallback', file=sys.stderr)
-    import urllib.request, urllib.error
+    import urllib.request, urllib.error, urllib.parse
 
     class MoonstoneAPIError(Exception):
         pass
