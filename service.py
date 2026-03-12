@@ -69,6 +69,19 @@ except ImportError:
         def get_page(self, page, format='wiki'):
             safe = page.replace(':', '/')
             return self.get('page/%s?format=%s' % (safe, format))
+        def upload_attachment(self, page_path, filename, raw_bytes):
+            safe = page_path.replace(":", "/")
+            safe_file = urllib.parse.quote(filename)
+            url = '%s/attachment/%s/%s' % (self.base_url, safe, safe_file)
+            headers = {'Content-Type': 'application/octet-stream'}
+            if self.auth_token:
+                headers['X-Auth-Token'] = self.auth_token
+            req = urllib.request.Request(url, data=raw_bytes, headers=headers, method='POST')
+            try:
+                resp = urllib.request.urlopen(req, timeout=self.timeout)
+                return json.loads(resp.read().decode('utf-8'))
+            except Exception as e:
+                raise MoonstoneAPIError(str(e))
         def wait_for_api(self, max_wait=30, interval=1):
             deadline = time.time() + max_wait
             while time.time() < deadline:
@@ -126,8 +139,8 @@ def get_todo_page(config):
     return config.get('todo_page', 'Inbox:Tasks')
 
 
-def format_message(message):
-    '''Format a Telegram message as wiki markup, parsing HTML if available.'''
+async def format_message(api, message, page_path):
+    '''Format a Telegram message as wiki markup, parsing HTML if available and saving attachments.'''
     user = message.from_user
     username = user.first_name or user.username or 'Unknown'
     ts = message.date.strftime('%H:%M') if message.date else '??:??'
@@ -159,14 +172,27 @@ def format_message(message):
 
     # Photo
     elif message.photo:
-        lines.append('**[%s] %s:** //[photo]//' % (ts, username))
+        file = await message.photo[-1].get_file()
+        file_bytes = await file.download_as_bytearray()
+        ext = file.file_path.split('.')[-1] if '.' in file.file_path else 'jpg'
+        filename = f"photo_{message.message_id}.{ext}"
+        
+        api.upload_attachment(page_path, filename, file_bytes)
+        lines.append('**[%s] %s:** {{./%s}}' % (ts, username, filename))
         if message.caption:
             lines.append(message.caption)
 
     # Document
     elif message.document:
         doc_name = message.document.file_name or 'document'
-        lines.append('**[%s] %s:** //[file: %s]//' % (ts, username, doc_name))
+        file = await message.document.get_file()
+        file_bytes = await file.download_as_bytearray()
+        
+        # Ensure unique name to avoid collision
+        filename = f"{message.message_id}_{doc_name}"
+        api.upload_attachment(page_path, filename, file_bytes)
+        
+        lines.append('**[%s] %s:** [[./%s|%s]]' % (ts, username, filename, doc_name))
         if message.caption:
             try:
                 lines.append(convert_html(message.caption_html))
@@ -175,8 +201,39 @@ def format_message(message):
 
     # Voice
     elif message.voice:
+        file = await message.voice.get_file()
+        file_bytes = await file.download_as_bytearray()
+        ext = file.file_path.split('.')[-1] if '.' in file.file_path else 'ogg'
+        filename = f"voice_{message.message_id}.{ext}"
+        
+        api.upload_attachment(page_path, filename, file_bytes)
+        
         duration = message.voice.duration or 0
-        lines.append('**[%s] %s:** //[voice %ds]//' % (ts, username, duration))
+        lines.append('**[%s] %s:** [[./%s|Voice message (%ds)]]' % (ts, username, filename, duration))
+
+    # Video
+    elif message.video:
+        file = await message.video.get_file()
+        file_bytes = await file.download_as_bytearray()
+        ext = file.file_path.split('.')[-1] if '.' in file.file_path else 'mp4'
+        filename = f"video_{message.message_id}.{ext}"
+        
+        api.upload_attachment(page_path, filename, file_bytes)
+        
+        lines.append('**[%s] %s:** [[./%s|Video message]]' % (ts, username, filename))
+        if message.caption:
+            lines.append(message.caption)
+
+    # Video Note
+    elif message.video_note:
+        file = await message.video_note.get_file()
+        file_bytes = await file.download_as_bytearray()
+        ext = file.file_path.split('.')[-1] if '.' in file.file_path else 'mp4'
+        filename = f"video_note_{message.message_id}.{ext}"
+        
+        api.upload_attachment(page_path, filename, file_bytes)
+        
+        lines.append('**[%s] %s:** [[./%s|Video note]]' % (ts, username, filename))
 
     # Sticker
     elif message.sticker:
@@ -276,7 +333,7 @@ async def run_bot(api, config):
         try:
             page_path = get_target_page(config)
             ensure_page_exists(api, page_path)
-            wiki_text = format_message(update.message)
+            wiki_text = await format_message(api, update.message, page_path)
             api.append(page_path, wiki_text)
 
             stats['messages_saved'] = stats.get('messages_saved', 0) + 1
