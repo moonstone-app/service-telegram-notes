@@ -56,13 +56,13 @@ except ImportError:
 
         def post(self, path, data=None): return self._request('POST', path, data)
         def get(self, path): return self._request('GET', path)
-        def append(self, page, content, format='wiki'):
+        def append(self, page, content, format='markdown'):
             safe = page.replace(':', '/')
             return self.post('page/%s/append' % safe, {'content': content, 'format': format})
-        def create_page(self, page, content='', format='wiki'):
+        def create_page(self, page, content='', format='markdown'):
             safe = page.replace(':', '/')
             return self.post('page/%s' % safe, {'content': content, 'format': format})
-        def get_page(self, page, format='wiki'):
+        def get_page(self, page, format='markdown'):
             safe = page.replace(':', '/')
             return self.get('page/%s?format=%s' % (safe, format))
         def upload_attachment(self, page_path, filename, raw_bytes):
@@ -136,7 +136,7 @@ def get_todo_page(config):
 
 
 async def format_message(api, message, page_path):
-    '''Format a Telegram message as wiki markup, parsing HTML if available and saving attachments.'''
+    '''Format a Telegram message as markdown, parsing HTML if available and saving attachments.'''
     user = message.from_user
     username = user.first_name or user.username or 'Unknown'
     ts = message.date.strftime('%H:%M') if message.date else '??:??'
@@ -145,16 +145,16 @@ async def format_message(api, message, page_path):
     lines.append('')  # blank line before entry
 
     def convert_html(html_text):
+        '''Convert Telegram HTML to Markdown.'''
         if not html_text:
             return ""
-        # Very simple conversion
         t = html_text
         t = t.replace('<b>', '**').replace('</b>', '**')
         t = t.replace('<strong>', '**').replace('</strong>', '**')
-        t = t.replace('<i>', '//').replace('</i>', '//')
-        t = t.replace('<em>', '//').replace('</em>', '//')
-        t = t.replace('<code>', "''").replace('</code>', "''")
-        t = t.replace('<pre>', "'''\n").replace('</pre>', "\n'''")
+        t = t.replace('<i>', '*').replace('</i>', '*')
+        t = t.replace('<em>', '*').replace('</em>', '*')
+        t = t.replace('<code>', '`').replace('</code>', '`')
+        t = t.replace('<pre>', '\n```\n').replace('</pre>', '\n```\n')
         return t
 
     # Text message
@@ -174,7 +174,8 @@ async def format_message(api, message, page_path):
         filename = f"photo_{message.message_id}.{ext}"
         
         api.upload_attachment(page_path, filename, file_bytes)
-        lines.append('**[%s] %s:** {{./%s}}' % (ts, username, filename))
+        lines.append('**[%s] %s:**' % (ts, username))
+        lines.append('![photo](%s)' % filename)
         if message.caption:
             lines.append(message.caption)
 
@@ -188,7 +189,7 @@ async def format_message(api, message, page_path):
         filename = f"{message.message_id}_{doc_name}"
         api.upload_attachment(page_path, filename, file_bytes)
         
-        lines.append('**[%s] %s:** [[./%s|%s]]' % (ts, username, filename, doc_name))
+        lines.append('**[%s] %s:** [%s](%s)' % (ts, username, doc_name, filename))
         if message.caption:
             try:
                 lines.append(convert_html(message.caption_html))
@@ -205,7 +206,7 @@ async def format_message(api, message, page_path):
         api.upload_attachment(page_path, filename, file_bytes)
         
         duration = message.voice.duration or 0
-        lines.append('**[%s] %s:** [[./%s|Voice message (%ds)]]' % (ts, username, filename, duration))
+        lines.append('**[%s] %s:** [Voice message (%ds)](%s)' % (ts, username, duration, filename))
 
     # Video
     elif message.video:
@@ -216,7 +217,7 @@ async def format_message(api, message, page_path):
         
         api.upload_attachment(page_path, filename, file_bytes)
         
-        lines.append('**[%s] %s:** [[./%s|Video message]]' % (ts, username, filename))
+        lines.append('**[%s] %s:** [Video message](%s)' % (ts, username, filename))
         if message.caption:
             lines.append(message.caption)
 
@@ -229,26 +230,26 @@ async def format_message(api, message, page_path):
         
         api.upload_attachment(page_path, filename, file_bytes)
         
-        lines.append('**[%s] %s:** [[./%s|Video note]]' % (ts, username, filename))
+        lines.append('**[%s] %s:** [Video note](%s)' % (ts, username, filename))
 
     # Sticker
     elif message.sticker:
         emoji = message.sticker.emoji or '🙂'
-        lines.append('**[%s] %s:** %s //[sticker]//' % (ts, username, emoji))
+        lines.append('**[%s] %s:** %s *[sticker]*' % (ts, username, emoji))
 
     # Location
     elif message.location:
         lat = message.location.latitude
         lon = message.location.longitude
-        lines.append('**[%s] %s:** //[[https://maps.google.com/?q=%f,%f|📍 Location]]//' % (
+        lines.append('**[%s] %s:** *[📍 Location](https://maps.google.com/?q=%f,%f)*' % (
             ts, username, lat, lon))
 
     # Forward
     elif message.forward_date:
-        lines.append('**[%s] %s:** //[forwarded message]//' % (ts, username))
+        lines.append('**[%s] %s:** *[forwarded message]*' % (ts, username))
 
     else:
-        lines.append('**[%s] %s:** //[unsupported message type]//' % (ts, username))
+        lines.append('**[%s] %s:** *[unsupported message type]*' % (ts, username))
 
     lines.append('')  # blank line after entry
     return '\n'.join(lines)
@@ -260,13 +261,13 @@ def ensure_page_exists(api, page_path):
         result = api.get_page(page_path)
         if not result.get('exists', False):
             title = page_path.split(':')[-1]
-            header = '====== %s ======\n\n' % title
+            header = '# %s\n\n' % title
             api.create_page(page_path, header)
             logger.info('Created page: %s', page_path)
     except MoonstoneAPIError as e:
         if e.status == 404 or 'not found' in str(e).lower():
             title = page_path.split(':')[-1]
-            header = '====== %s ======\n\n' % title
+            header = '# %s\n\n' % title
             try:
                 api.create_page(page_path, header)
                 logger.info('Created page: %s', page_path)
@@ -307,8 +308,6 @@ async def run_bot(api, config):
     stats['started_at'] = datetime.now(timezone.utc).isoformat()
     save_state('stats', stats)
 
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
     async def check_auth(update: Update) -> bool:
         user_id = update.effective_user.id if update.effective_user else None
         if allowed_ids and user_id not in allowed_ids:
@@ -329,21 +328,16 @@ async def run_bot(api, config):
         try:
             page_path = get_target_page(config)
             ensure_page_exists(api, page_path)
-            wiki_text = await format_message(api, update.message, page_path)
-            api.append(page_path, wiki_text)
+            md_text = await format_message(api, update.message, page_path)
+            api.append(page_path, md_text)
 
             stats['messages_saved'] = stats.get('messages_saved', 0) + 1
             save_state('stats', stats)
 
             logger.info('Saved message from %s to %s',
                         update.message.from_user.first_name, page_path)
-            
-            keyboard = [
-                [InlineKeyboardButton("Open Page", callback_data=f"open:{page_path}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text('✅ Saved to %s' % page_path.replace(':', ' → '), reply_markup=reply_markup)
+            await update.message.reply_text('✅ Saved to %s' % page_path.replace(':', ' → '))
 
         except MoonstoneAPIError as e:
             logger.error('Failed to save message: %s', e)
@@ -360,12 +354,6 @@ async def run_bot(api, config):
         except:
             pass
         name = nb.get('name', 'your notebook')
-        
-        keyboard = [
-            [InlineKeyboardButton("Status", callback_data="status"),
-             InlineKeyboardButton("Target Page", callback_data="target")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
             '📝 Hi! I save your messages to Moonstone notebook "%s".\n\n'
@@ -376,8 +364,7 @@ async def run_bot(api, config):
             '/search <query> — search notes\n'
             '/status — check service status\n'
             '/page — show current target page\n'
-            % (name, get_target_page(config).replace(':', ' → ')),
-            reply_markup=reply_markup
+            % (name, get_target_page(config).replace(':', ' → '))
         )
 
     async def cmd_status(update: Update, context):
@@ -413,16 +400,11 @@ async def run_bot(api, config):
         try:
             page_path = get_todo_page(config)
             ensure_page_exists(api, page_path)
-            wiki_text = f"\n[ ] {text}"
-            api.append(page_path, wiki_text)
+            md_text = f"\n- [ ] {text}"
+            api.append(page_path, md_text)
 
             logger.info('Saved task to %s', page_path)
-            
-            keyboard = [
-                [InlineKeyboardButton("Open Page", callback_data=f"open:{page_path}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text('✅ Task saved to %s' % page_path.replace(':', ' → '), reply_markup=reply_markup)
+            await update.message.reply_text('✅ Task saved to %s' % page_path.replace(':', ' → '))
         except MoonstoneAPIError as e:
             logger.error('Failed to save task: %s', e)
             await update.message.reply_text('❌ Failed to save task: %s' % str(e)[:100])
@@ -444,54 +426,19 @@ async def run_bot(api, config):
                 return
             
             msg = '🔍 **Search results for "%s":**\n\n' % query
-            keyboard = []
             
             for i, r in enumerate(result[:5]):
                 name = r.get('name', 'Unknown')
                 msg += '• %s\n' % name
-                keyboard.append([InlineKeyboardButton("Open " + name, callback_data=f"open:{name}")])
                 
             if len(result) > 5:
                 msg += '\n...and %d more.' % (len(result) - 5)
                 
-            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-            await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+            await update.message.reply_text(msg, parse_mode='Markdown')
             
         except MoonstoneAPIError as e:
             logger.error('Search failed: %s', e)
             await update.message.reply_text('❌ Search failed: %s' % str(e)[:100])
-
-    from telegram.ext import CallbackQueryHandler
-
-    async def handle_callback(update: Update, context):
-        '''Handle inline button callbacks.'''
-        query = update.callback_query
-        if not await check_auth(update):
-            await query.answer("Unauthorized", show_alert=True)
-            return
-            
-        await query.answer()
-        data = query.data
-        
-        if data == "status":
-            s = load_state('stats', {})
-            msg = '📊 Status:\n'
-            msg += '• Messages saved: %d\n' % s.get('messages_saved', 0)
-            msg += '• Running since: %s\n' % (s.get('started_at', 'unknown')[:19])
-            msg += '• Target page: %s\n' % get_target_page(config).replace(':', ' → ')
-            await query.edit_message_text(msg)
-            
-        elif data == "target":
-            page = get_target_page(config)
-            await query.edit_message_text('📄 Target: %s' % page.replace(':', ' → '))
-            
-        elif data.startswith("open:"):
-            page = data.split(":", 1)[1]
-            try:
-                api.navigate(page)
-                await query.edit_message_text('📄 Opened in Moonstone: %s' % page.replace(':', ' → '))
-            except MoonstoneAPIError:
-                await query.edit_message_text('📄 Target: %s' % page.replace(':', ' → '))
 
     # Build and run the bot
     app = Application.builder().token(bot_token).build()
@@ -500,7 +447,6 @@ async def run_bot(api, config):
     app.add_handler(CommandHandler('page', cmd_page))
     app.add_handler(CommandHandler('todo', cmd_todo))
     app.add_handler(CommandHandler('search', cmd_search))
-    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     logger.info('Starting Telegram bot polling...')
