@@ -124,6 +124,79 @@ logger = logging.getLogger('telegram-notes')
 SUPPORTED_PROXY_SCHEMES = {'http', 'https', 'socks5'}
 
 
+def truncate_text(value, limit=160):
+    '''Shorten log text to a readable preview.'''
+    if value is None:
+        return ''
+    text = str(value).replace('\n', '\\n')
+    if len(text) <= limit:
+        return text
+    return text[:limit - 3] + '...'
+
+
+def describe_message(message):
+    '''Build a compact message summary for logs.'''
+    if not message:
+        return 'message=<none>'
+
+    user = getattr(message, 'from_user', None)
+    chat = getattr(message, 'chat', None)
+    parts = [
+        'message_id=%s' % getattr(message, 'message_id', '?'),
+        'chat_id=%s' % getattr(chat, 'id', '?'),
+        'chat_type=%s' % getattr(chat, 'type', '?'),
+        'user_id=%s' % getattr(user, 'id', '?'),
+        'username=%s' % (getattr(user, 'username', None) or getattr(user, 'first_name', 'Unknown')),
+    ]
+
+    if getattr(message, 'text', None):
+        parts.append('type=text')
+        parts.append('text=%s' % truncate_text(message.text))
+    elif getattr(message, 'photo', None):
+        parts.append('type=photo')
+        parts.append('caption=%s' % truncate_text(getattr(message, 'caption', '')))
+    elif getattr(message, 'document', None):
+        parts.append('type=document')
+        parts.append('file_name=%s' % truncate_text(getattr(message.document, 'file_name', 'document')))
+        parts.append('caption=%s' % truncate_text(getattr(message, 'caption', '')))
+    elif getattr(message, 'voice', None):
+        parts.append('type=voice')
+        parts.append('duration=%s' % getattr(message.voice, 'duration', '?'))
+    elif getattr(message, 'video', None):
+        parts.append('type=video')
+        parts.append('caption=%s' % truncate_text(getattr(message, 'caption', '')))
+    elif getattr(message, 'video_note', None):
+        parts.append('type=video_note')
+    elif getattr(message, 'sticker', None):
+        parts.append('type=sticker')
+        parts.append('emoji=%s' % getattr(message.sticker, 'emoji', ''))
+    elif getattr(message, 'location', None):
+        parts.append('type=location')
+    else:
+        parts.append('type=other')
+
+    return ', '.join(parts)
+
+
+def describe_update(update):
+    '''Build a compact update summary for logs.'''
+    if not update:
+        return 'update=<none>'
+
+    parts = ['update_id=%s' % getattr(update, 'update_id', '?')]
+    if getattr(update, 'message', None):
+        parts.append(describe_message(update.message))
+    elif getattr(update, 'edited_message', None):
+        parts.append('edited_%s' % describe_message(update.edited_message))
+    elif getattr(update, 'callback_query', None):
+        query = update.callback_query
+        parts.append('callback_query_id=%s' % getattr(query, 'id', '?'))
+        parts.append('data=%s' % truncate_text(getattr(query, 'data', '')))
+    else:
+        parts.append('known_fields=%s' % truncate_text(','.join(sorted(update.to_dict().keys())), 200))
+    return ', '.join(parts)
+
+
 def get_target_page(config):
     '''Determine the target page path based on config.'''
     base = config.get('target_page', 'Inbox:Telegram')
@@ -312,8 +385,10 @@ async def format_message(api, message, page_path):
 
 def ensure_page_exists(api, page_path):
     '''Create the target page if it doesn't exist yet.'''
+    logger.info('Checking Moonstone page: %s', page_path)
     try:
         result = api.get_page(page_path)
+        logger.info('Moonstone page lookup for %s: exists=%s', page_path, result.get('exists', False))
         if not result.get('exists', False):
             title = page_path.split(':')[-1]
             header = '# %s\n\n' % title
@@ -333,7 +408,7 @@ def ensure_page_exists(api, page_path):
 async def run_bot(api, config):
     '''Run the Telegram bot.'''
     from telegram import Update
-    from telegram.ext import Application, MessageHandler, CommandHandler, filters
+    from telegram.ext import Application, MessageHandler, CommandHandler, TypeHandler, filters
 
     bot_token = config.get('bot_token', '')
     proxy_url = get_proxy_url(config)
@@ -360,6 +435,7 @@ async def run_bot(api, config):
             uid = uid.strip()
             if uid.isdigit():
                 allowed_ids.add(int(uid))
+    logger.info('Allowed users configured: %d', len(allowed_ids))
 
     stats = load_state('stats', {}) or {}
     try:
@@ -376,21 +452,37 @@ async def run_bot(api, config):
             if update.message:
                 await update.message.reply_text('⛔ You are not authorized to use this bot.')
             return False
+        logger.info('Authorized update from user_id=%s', user_id)
         return True
+
+    async def trace_update(update: Update, context):
+        logger.info('Telegram update received: %s', describe_update(update))
+
+    async def handle_error(update: object, context):
+        update_summary = describe_update(update) if hasattr(update, 'to_dict') else truncate_text(update)
+        logger.exception('Telegram handler error. update=%s error=%s', update_summary, context.error)
 
     async def handle_message(update: Update, context):
         '''Handle incoming Telegram messages.'''
         if not update.message:
+            logger.info('Received update without message payload: %s', describe_update(update))
             return
 
+        logger.info('Processing incoming message: %s', describe_message(update.message))
         if not await check_auth(update):
             return
 
         try:
             page_path = get_target_page(config)
+            logger.info('Target Moonstone page for message_id=%s: %s', update.message.message_id, page_path)
             ensure_page_exists(api, page_path)
             md_text = await format_message(api, update.message, page_path)
-            api.append(page_path, md_text)
+            logger.info('Formatted message_id=%s markdown preview: %s',
+                        update.message.message_id, truncate_text(md_text, 240))
+            logger.info('Appending message_id=%s to Moonstone page %s', update.message.message_id, page_path)
+            append_result = api.append(page_path, md_text)
+            logger.info('Moonstone append result for message_id=%s: %s',
+                        update.message.message_id, truncate_text(append_result, 240))
 
             stats['messages_saved'] += 1
             save_state('stats', stats)
@@ -401,8 +493,13 @@ async def run_bot(api, config):
             await update.message.reply_text('✅ Saved to %s' % page_path.replace(':', ' → '))
 
         except MoonstoneAPIError as e:
-            logger.error('Failed to save message: %s', e)
+            logger.exception('Failed to save message_id=%s to Moonstone: %s',
+                             update.message.message_id, e)
             await update.message.reply_text('❌ Failed to save: %s' % str(e)[:100])
+        except Exception as e:
+            logger.exception('Unexpected error while processing message_id=%s: %s',
+                             update.message.message_id, e)
+            await update.message.reply_text('❌ Unexpected error while saving message')
 
     async def cmd_start(update: Update, context):
         '''Handle /start command.'''
@@ -430,6 +527,7 @@ async def run_bot(api, config):
 
     async def cmd_status(update: Update, context):
         '''Handle /status command.'''
+        logger.info('Handling /status: %s', describe_message(update.message))
         s = load_state('stats', {})
         msg = '📊 Status:\n'
         msg += '• Messages saved: %d\n' % s.get('messages_saved', 0)
@@ -442,6 +540,7 @@ async def run_bot(api, config):
         if not await check_auth(update):
             return
         page = get_target_page(config)
+        logger.info('Handling /page for user_id=%s target=%s', update.effective_user.id, page)
         try:
             api.navigate(page)
             await update.message.reply_text('📄 Opened: %s' % page.replace(':', ' → '))
@@ -460,14 +559,15 @@ async def run_bot(api, config):
             
         try:
             page_path = get_todo_page(config)
+            logger.info('Handling /todo for page %s text=%s', page_path, truncate_text(text, 200))
             ensure_page_exists(api, page_path)
             md_text = f"\n- [ ] {text}"
-            api.append(page_path, md_text)
+            append_result = api.append(page_path, md_text)
 
-            logger.info('Saved task to %s', page_path)
+            logger.info('Saved task to %s result=%s', page_path, truncate_text(append_result, 240))
             await update.message.reply_text('✅ Task saved to %s' % page_path.replace(':', ' → '))
         except MoonstoneAPIError as e:
-            logger.error('Failed to save task: %s', e)
+            logger.exception('Failed to save task: %s', e)
             await update.message.reply_text('❌ Failed to save task: %s' % str(e)[:100])
 
     async def cmd_search(update: Update, context):
@@ -481,6 +581,7 @@ async def run_bot(api, config):
             return
             
         try:
+            logger.info('Handling /search query=%s', truncate_text(query, 200))
             result = api.search(query)
             if not result:
                 await update.message.reply_text('🔍 No results found for "%s".' % query)
@@ -498,13 +599,15 @@ async def run_bot(api, config):
             await update.message.reply_text(msg, parse_mode='Markdown')
             
         except MoonstoneAPIError as e:
-            logger.error('Search failed: %s', e)
+            logger.exception('Search failed: %s', e)
             await update.message.reply_text('❌ Search failed: %s' % str(e)[:100])
 
     # Build and run the bot
     builder = Application.builder().token(bot_token)
     builder = apply_proxy(builder, proxy_url)
     app = builder.build()
+    app.add_error_handler(handle_error)
+    app.add_handler(TypeHandler(Update, trace_update), group=-1)
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('status', cmd_status))
     app.add_handler(CommandHandler('page', cmd_page))
@@ -515,8 +618,11 @@ async def run_bot(api, config):
     logger.info('Starting Telegram bot polling...')
     try:
         await app.initialize()
+        logger.info('Telegram app initialized successfully')
         await app.start()
+        logger.info('Telegram app started successfully')
         await app.updater.start_polling(drop_pending_updates=True)
+        logger.info('Polling loop started; waiting for Telegram updates')
 
         # Run until stopped
         stop_event = asyncio.Event()
