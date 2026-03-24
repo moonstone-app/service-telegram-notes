@@ -17,6 +17,13 @@
       "required": true
     },
     {
+      "key": "proxy_url",
+      "label": "Proxy URL",
+      "type": "string",
+      "description": "Optional http://, https://, or socks5:// proxy for Telegram requests",
+      "default": ""
+    },
+    {
       "key": "allowed_users",
       "label": "Allowed User IDs",
       "type": "string",

@@ -1,1 +1,1 @@
-python-telegram-bot>=20.0,<22.0
+python-telegram-bot[socks]>=20.0,<22.0

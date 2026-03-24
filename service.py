@@ -19,6 +19,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 # Find moonstone_sdk via MOONSTONE_SDK_PATH env var (set by ServiceManager)
 sdk_env = os.environ.get('MOONSTONE_SDK_PATH')
@@ -120,6 +121,8 @@ except ImportError:
 
 logger = logging.getLogger('telegram-notes')
 
+SUPPORTED_PROXY_SCHEMES = {'http', 'https', 'socks5'}
+
 
 def get_target_page(config):
     '''Determine the target page path based on config.'''
@@ -133,6 +136,58 @@ def get_target_page(config):
 def get_todo_page(config):
     '''Determine the ToDo page path based on config.'''
     return config.get('todo_page', 'Inbox:Tasks')
+
+
+def get_proxy_url(config):
+    '''Return a validated Telegram proxy URL from config, or an empty string.'''
+    proxy_url = (config.get('proxy_url') or '').strip()
+    if not proxy_url:
+        return ''
+
+    scheme = urlsplit(proxy_url).scheme.lower()
+    if scheme not in SUPPORTED_PROXY_SCHEMES:
+        raise ValueError(
+            'Unsupported proxy_url scheme "%s". Use http://, https://, or socks5://'
+            % (scheme or '')
+        )
+    return proxy_url
+
+
+def mask_proxy_url(proxy_url):
+    '''Hide credentials before logging a proxy URL.'''
+    if not proxy_url:
+        return ''
+
+    parts = urlsplit(proxy_url)
+    host = parts.hostname or ''
+    if parts.port:
+        host = '%s:%s' % (host, parts.port)
+    return '%s://%s' % (parts.scheme, host)
+
+
+def apply_proxy(builder, proxy_url):
+    '''Apply proxy settings to the Telegram application builder.'''
+    if not proxy_url:
+        return builder
+
+    for method_name in ('proxy', 'proxy_url'):
+        method = getattr(builder, method_name, None)
+        if method:
+            builder = method(proxy_url)
+            break
+    else:
+        logger.warning('Telegram builder does not support outbound proxy configuration')
+
+    for method_name in ('get_updates_proxy', 'get_updates_proxy_url'):
+        method = getattr(builder, method_name, None)
+        if method:
+            builder = method(proxy_url)
+            break
+    else:
+        logger.warning('Telegram builder does not support polling proxy configuration')
+
+    logger.info('Using Telegram proxy: %s', mask_proxy_url(proxy_url))
+    return builder
 
 
 async def format_message(api, message, page_path):
@@ -265,7 +320,7 @@ def ensure_page_exists(api, page_path):
             api.create_page(page_path, header)
             logger.info('Created page: %s', page_path)
     except MoonstoneAPIError as e:
-        if e.status == 404 or 'not found' in str(e).lower():
+        if getattr(e, 'status', None) == 404 or 'not found' in str(e).lower():
             title = page_path.split(':')[-1]
             header = '# %s\n\n' % title
             try:
@@ -281,6 +336,7 @@ async def run_bot(api, config):
     from telegram.ext import Application, MessageHandler, CommandHandler, filters
 
     bot_token = config.get('bot_token', '')
+    proxy_url = get_proxy_url(config)
     if not bot_token:
         logger.error('No bot_token configured! Set it via /api/services/telegram-notes/config')
         logger.error('Example: PUT {"bot_token": "123456:ABC..."} to /api/services/telegram-notes/config')
@@ -289,6 +345,7 @@ async def run_bot(api, config):
             await asyncio.sleep(10)
             config = load_config()
             bot_token = config.get('bot_token', '')
+            proxy_url = get_proxy_url(config)
             if bot_token:
                 logger.info('Bot token detected, restarting...')
                 break
@@ -304,7 +361,11 @@ async def run_bot(api, config):
             if uid.isdigit():
                 allowed_ids.add(int(uid))
 
-    stats = load_state('stats', {'messages_saved': 0, 'started_at': None})
+    stats = load_state('stats', {}) or {}
+    try:
+        stats['messages_saved'] = int(stats.get('messages_saved', 0) or 0)
+    except (TypeError, ValueError):
+        stats['messages_saved'] = 0
     stats['started_at'] = datetime.now(timezone.utc).isoformat()
     save_state('stats', stats)
 
@@ -331,7 +392,7 @@ async def run_bot(api, config):
             md_text = await format_message(api, update.message, page_path)
             api.append(page_path, md_text)
 
-            stats['messages_saved'] = stats.get('messages_saved', 0) + 1
+            stats['messages_saved'] += 1
             save_state('stats', stats)
 
             logger.info('Saved message from %s to %s',
@@ -441,7 +502,9 @@ async def run_bot(api, config):
             await update.message.reply_text('❌ Search failed: %s' % str(e)[:100])
 
     # Build and run the bot
-    app = Application.builder().token(bot_token).build()
+    builder = Application.builder().token(bot_token)
+    builder = apply_proxy(builder, proxy_url)
+    app = builder.build()
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('status', cmd_status))
     app.add_handler(CommandHandler('page', cmd_page))
@@ -499,6 +562,14 @@ def main():
     logger.info('Config loaded: target_page=%s, date_subpages=%s',
                 config.get('target_page', 'Inbox:Telegram'),
                 config.get('date_subpages', True))
+
+    try:
+        proxy_url = get_proxy_url(config)
+    except ValueError as e:
+        logger.error('Invalid proxy configuration: %s', e)
+        sys.exit(1)
+    if proxy_url:
+        logger.info('Proxy configured: %s', mask_proxy_url(proxy_url))
 
     if not config.get('bot_token'):
         logger.warning('No bot_token set! Configure via API:')
